@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Бронирование репетиций</title>
+    <style>
+        * { box-sizing: border-box; font-family: system-ui, 'Segoe UI', sans-serif; }
+        body { background: #f0f2f5; margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: auto; }
+        .card { background: white; border-radius: 28px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        .flex { display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-end; }
+        .field { display: flex; flex-direction: column; gap: 6px; min-width: 180px; }
+        label { font-weight: 600; font-size: 0.85rem; }
+        input, button { padding: 8px 16px; border-radius: 40px; border: 1px solid #ccc; }
+        button { background: #1e466e; color: white; border: none; cursor: pointer; }
+        button.success { background: #2c7a4d; }
+        button.danger { background: #b91c1c; }
+        .slot-list, .booking-list { display: flex; flex-direction: column; gap: 12px; }
+        .slot-item, .booking-row { background: #f8fafc; padding: 14px 18px; border-radius: 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+        .slot-time { font-weight: bold; background: #eef2ff; padding: 5px 16px; border-radius: 40px; }
+        .empty { text-align: center; color: #6c7a8e; padding: 30px; font-style: italic; }
+        .loading { text-align: center; padding: 30px; }
+        .spinner { border: 3px solid #ddd; border-top-color: #1e466e; border-radius: 50%; width: 30px; height: 30px; animation: spin 0.8s linear infinite; display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .error-msg { color: #b91c1c; background: #fee; padding: 10px; border-radius: 20px; }
+        .note-text { font-size: 0.75rem; color: #555; margin-top: 4px; }
+        .booking-actions { display: flex; gap: 8px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        <h2>🔧 Подключение</h2>
+        <div class="flex">
+            <div class="field">
+                <label>URL веб-приложения</label>
+                <input type="text" id="apiUrl" placeholder="https://script.google.com/macros/s/.../exec" style="min-width: 300px;">
+            </div>
+            <div class="field">
+                <label>API токен</label>
+                <input type="password" id="apiToken" placeholder="mySecretApiKey2026">
+            </div>
+            <button id="saveBtn">💾 Сохранить</button>
+            <button id="checkBtn">🔌 Проверить</button>
+        </div>
+        <div id="statusMsg"></div>
+    </div>
+
+    <div class="card">
+        <div class="flex">
+            <div class="field">
+                <label>📅 Дата</label>
+                <input type="date" id="datePicker">
+            </div>
+            <button id="refreshBtn" class="success">🔄 Показать</button>
+            <button id="todayBtn">Сегодня</button>
+        </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+        <div class="card">
+            <h2>🎧 Свободные слоты</h2>
+            <div id="slotsContainer">—</div>
+        </div>
+        <div class="card">
+            <h2>📋 Занятые слоты</h2>
+            <div id="bookingsContainer">—</div>
+        </div>
+    </div>
+</div>
+
+<script>
+
+    let apiUrl = localStorage.getItem('rehearsal_api_url') || "";
+    let apiToken = localStorage.getItem('rehearsal_api_token') || "";
+
+    const apiUrlInput = document.getElementById('apiUrl');
+    const apiTokenInput = document.getElementById('apiToken');
+    const saveBtn = document.getElementById('saveBtn');
+    const checkBtn = document.getElementById('checkBtn');
+    const statusDiv = document.getElementById('statusMsg');
+    const datePicker = document.getElementById('datePicker');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const todayBtn = document.getElementById('todayBtn');
+    const slotsDiv = document.getElementById('slotsContainer');
+    const bookingsDiv = document.getElementById('bookingsContainer');
+
+    function showMessage(text, isError = false) {
+        statusDiv.innerHTML = `<div class="${isError ? 'error-msg' : ''}" style="margin-top:8px;">${text}</div>`;
+        setTimeout(() => { if (statusDiv.innerHTML.includes(text)) statusDiv.innerHTML = ''; }, 5000);
+    }
+
+    function saveSettings() {
+        apiUrl = apiUrlInput.value.trim();
+        apiToken = apiTokenInput.value.trim();
+        if (apiUrl) localStorage.setItem('rehearsal_api_url', apiUrl);
+        else localStorage.removeItem('rehearsal_api_url');
+        if (apiToken) localStorage.setItem('rehearsal_api_token', apiToken);
+        else localStorage.removeItem('rehearsal_api_token');
+        showMessage('Настройки сохранены');
+    }
+
+    // --- GET-запросы (слоты, брони, отмена) ---
+    async function getJSON(params) {
+        if (!apiUrl) throw new Error('URL не задан');
+        if (!apiToken) throw new Error('Токен не задан');
+        const base = apiUrl.replace(/\/$/, '');
+        const urlParams = new URLSearchParams({ token: apiToken, ...params });
+        const url = base + '?' + urlParams.toString();
+        const resp = await fetch(url, { mode: 'cors', credentials: 'omit' });
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+        return data;
+    }
+
+    // --- POST-запрос (создание брони) ---
+    async function postJSON(params, body) {
+        if (!apiUrl) throw new Error('URL не задан');
+        if (!apiToken) throw new Error('Токен не задан');
+        const base = apiUrl.replace(/\/$/, '');
+        const urlParams = new URLSearchParams({ token: apiToken, ...params, ...body });
+        const url = base + '?' + urlParams.toString();
+        const resp = await fetch(url, {
+            method: 'GET',
+            // headers: { 'Content-Type': 'application/json' },
+            // body: JSON.stringify(body),
+            mode: 'cors',
+            credentials: 'omit'
+        });
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+        return data;
+    }
+
+    async function getSlots(date) {
+        const data = await getJSON({ action: 'slots', date });
+        return data.slots || [];
+    }
+
+    async function getBookings(date) {
+        const data = await getJSON({ action: 'bookings', date });
+        // нормализуем время
+        const fixTime = (val) => {
+            if (!val) return '';
+            if (typeof val === 'string' && /^\d{2}:\d{2}$/.test(val)) return val;
+            const d = new Date(val);
+            if (!isNaN(d.getTime())) return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+            return val;
+        };
+        return (data.bookings || []).map(b => ({ ...b, start: fixTime(b.start), end: fixTime(b.end) }));
+    }
+
+    async function createBooking(date, start, end, band, contact, note) {
+        return await postJSON({ action: 'book' }, {
+            date, startTime: start, endTime: end, band, contact, note
+        });
+    }
+
+    async function cancelBooking(id) {
+        return await getJSON({ action: 'cancel', id });
+    }
+
+    async function testConnection() {
+        try {
+            const today = new Date().toISOString().slice(0,10);
+            await getSlots(today);
+            showMessage('✅ Соединение работает (сервер вернул JSON)');
+            return true;
+        } catch (err) {
+            showMessage(`❌ Ошибка: ${err.message}`, true);
+            return false;
+        }
+    }
+
+    async function loadData() {
+        const date = datePicker.value;
+        if (!date) { showMessage('Выберите дату', true); return; }
+        slotsDiv.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+        bookingsDiv.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+        try {
+            const [slots, bookings] = await Promise.all([getSlots(date), getBookings(date)]);
+            console.log(slots)
+            // отрисовка свободных слотов
+            if (slots.length === 0) {
+                slotsDiv.innerHTML = '<div class="empty">✨ Нет свободных слотов</div>';
+            } else {
+                const list = document.createElement('div');
+                list.className = 'slot-list';
+                slots.forEach(s => {
+                    const div = document.createElement('div');
+                    div.className = 'slot-item';
+                    div.innerHTML = `<span class="slot-time">${s.start} – ${s.end}</span>
+                                    <button class="book-btn" data-start="${s.start}" data-end="${s.end}">🎸 Забронировать</button>`;
+                    list.appendChild(div);
+                });
+                slotsDiv.innerHTML = '';
+                slotsDiv.appendChild(list);
+                // обработчики бронирования
+                document.querySelectorAll('.book-btn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const start = btn.dataset.start;
+                        const end = btn.dataset.end;
+                        const band = prompt('Название группы:');
+                        if (!band) return;
+                        const contact = prompt('Контакт (телефон/email):');
+                        if (!contact) return;
+                        const note = prompt('Примечание (необязательно):', '');
+                        try {
+                            const res = await createBooking(date, start, end, band, contact, note);
+                            if (res.sucess) {
+                                showMessage(`✅ Бронь создана, ID: ${res.bookingId}`);
+                                loadData();
+                            } else {
+                                showMessage(`❌ Ошибка: ${res.message}`, true);
+                            }
+                        } catch (err) {
+                            showMessage(`❌ ${err.message}`, true);
+                        }
+                    });
+                });
+            }
+            // отрисовка занятых слотов
+            if (bookings.length === 0) {
+                bookingsDiv.innerHTML = '<div class="empty">📭 Нет бронирований</div>';
+            } else {
+
+                const list = document.createElement('div');
+                list.className = 'booking-list';
+                bookings.forEach(b => {
+                    const div = document.createElement('div');
+                    div.className = 'booking-row';
+                    div.innerHTML = `
+                        <div class="booking-info">
+                            <strong>${b.start}–${b.end}</strong>
+                            <b>${escapeHtml(b.band)}</b> (${escapeHtml(b.contact)})
+                            ${b.note ? `<div class="note-text">📝 ${escapeHtml(b.note)}</div>` : ''}
+                            <div><span style="font-size:0.7rem; background:#eef2ff; padding:2px 8px; border-radius:20px;">ID: ${b.id}</span></div>
+                        </div>
+                        <div class="booking-actions">
+                            <button class="contact-btn" data-contact="${escapeHtml(b.contact)}">📞 Связаться</button>
+                            <button class="cancel-btn" data-id="${b.id}" style="background:#b91c1c;">✖ Отменить</button>
+                        </div>
+                    `;
+                    list.appendChild(div);
+                });
+                bookingsDiv.innerHTML = '';
+                bookingsDiv.appendChild(list);
+                // копирование контакта
+                document.querySelectorAll('.contact-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const contact = btn.dataset.contact;
+                        navigator.clipboard.writeText(contact).then(() => showMessage(`📋 Контакт скопирован: ${contact}`));
+                    });
+                });
+                // отмена
+                document.querySelectorAll('.cancel-btn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const id = btn.dataset.id;
+                        if (confirm(`Отменить бронь ${id}?`)) {
+                            try {
+                                const res = await cancelBooking(id);
+                                if (res.success) {
+                                    showMessage(`✅ Бронь ${id} отменена`);
+                                    loadData();
+                                } else {
+                                    showMessage(`❌ ${res.message}`, true);
+                                }
+                            } catch (err) {
+                                showMessage(`❌ ${err.message}`, true);
+                            }
+                        }
+                    });
+                });
+            }
+        } catch (err) {
+            slotsDiv.innerHTML = `<div class="empty error-msg">⚠️ ${err.message}</div>`;
+            bookingsDiv.innerHTML = `<div class="empty error-msg">⚠️ Ошибка</div>`;
+        }
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        str = JSON.stringify(str)
+        return str.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+    }
+
+    // инициализация
+    loadSettingsToUI();
+    const today = new Date().toISOString().slice(0,10);
+    datePicker.value = today;
+    saveBtn.onclick = () => { saveSettings(); testConnection(); };
+    checkBtn.onclick = testConnection;
+    refreshBtn.onclick = loadData;
+    todayBtn.onclick = () => { datePicker.value = new Date().toISOString().slice(0,10); loadData(); };
+    if (apiUrl && apiToken) testConnection().then(ok => ok && loadData());
+    else slotsDiv.innerHTML = '<div class="empty">🔧 Сохраните URL и токен</div>';
+
+    function loadSettingsToUI() {
+        apiUrlInput.value = apiUrl;
+        apiTokenInput.value = apiToken;
+    }
+</script>
+</body>
+</html>
